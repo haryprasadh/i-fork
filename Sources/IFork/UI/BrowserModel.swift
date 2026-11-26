@@ -125,27 +125,3 @@ struct Place: Identifiable, Hashable {
         }
     }
 }
-
-/// Lets rows be dragged straight into Finder: the file is pulled on drop.
-struct PhoneDragItem: Transferable {
-    let entry: PhoneEntry
-    let serial: String
-
-    static var transferRepresentation: some TransferRepresentation {
-        FileRepresentation(exportedContentType: .data) { item in
-            let dir = FileManager.default.temporaryDirectory.appendingPathComponent("iFork-drag-\(UUID().uuidString)")
-            let dest = dir.appendingPathComponent(item.entry.name)
-            try await Task.detached(priority: .userInitiated) {
-                let sync = try AdbSync(serial: item.serial)
-                defer { sync.quit() }
-                let files = item.entry.isDirectory ? try PhoneFS.listRecursive(item.serial, item.entry.path) : [item.entry]
-                let parent = (item.entry.path as NSString).deletingLastPathComponent
-                for f in files {
-                    let local = dir.appendingPathComponent(String(f.path.dropFirst(parent.count + 1)))
-                    try sync.pull(f.path, to: local, progress: { _ in }, isCancelled: { false })
-                }
-            }.value
-            return SentTransferredFile(dest)
-        }
-    }
-}

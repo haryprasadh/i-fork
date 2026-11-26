@@ -17,19 +17,15 @@ struct BrowserView: View {
             ZStack {
                 table
                 if browser.loading && browser.entries.isEmpty { ProgressView() }
-                if let err = browser.error {
-                    ContentUnavailableView("Can't open folder", systemImage: "exclamationmark.triangle", description: Text(err))
-                } else if !browser.loading && browser.entries.isEmpty {
-                    ContentUnavailableView("Empty folder", systemImage: "folder", description: Text("Drop files here to send them to your phone."))
+                Group {
+                    if let err = browser.error {
+                        ContentUnavailableView("Can't open folder", systemImage: "exclamationmark.triangle", description: Text(err))
+                    } else if !browser.loading && browser.entries.isEmpty {
+                        ContentUnavailableView("Empty folder", systemImage: "folder", description: Text("Drop files here to send them to your phone."))
+                    }
                 }
-                if ui.dropTargeted { dropOverlay }
+                .allowsHitTesting(false)
             }
-            .dropDestination(for: URL.self) { urls, _ in
-                let files = urls.filter { $0.isFileURL && !$0.path.contains("/iFork-drag-") }
-                guard !files.isEmpty else { return false }
-                send(files)
-                return true
-            } isTargeted: { ui.dropTargeted = $0 }
         }
         .toolbar { toolbar }
         .confirmationDialog(deleteTitle,
@@ -67,57 +63,16 @@ struct BrowserView: View {
     }
 
     private var table: some View {
-        Table(of: PhoneEntry.self, selection: Bindable(browser).selection) {
-            TableColumn("Name") { e in
-                HStack(spacing: 8) {
-                    Image(nsImage: icon(for: e)).resizable().frame(width: 18, height: 18)
-                    Text(e.name).lineLimit(1).truncationMode(.middle)
-                }
-            }
-            .width(min: 220, ideal: 380)
-            TableColumn("Size") { e in
-                Text(e.isDirectory ? "—" : Fmt.bytes(e.size)).foregroundStyle(.secondary).monospacedDigit()
-            }
-            .width(min: 70, ideal: 90)
-            TableColumn("Modified") { e in
-                Text(Fmt.date.string(from: e.modified)).foregroundStyle(.secondary)
-            }
-            .width(min: 120, ideal: 170)
-        } rows: {
-            ForEach(browser.entries) { e in
-                TableRow(e).draggable(PhoneDragItem(entry: e, serial: phone.primary))
-            }
-        }
-        .contextMenu(forSelectionType: PhoneEntry.ID.self) { ids in
-            let items = browser.entries.filter { ids.contains($0.id) }
-            if items.count == 1, items[0].isDirectory {
-                Button("Open") { browser.open(items[0]) }
-            }
-            Button("Save to \(saveDir.lastPathComponent)") { save(items) }
-            Button("Save to…") { chooseAndSave(items) }
-            Divider()
-            Button("Delete…", role: .destructive) { ui.confirmDelete = items }
-        } primaryAction: { ids in
-            let items = browser.entries.filter { ids.contains($0.id) }
-            if items.count == 1, items[0].isDirectory { browser.open(items[0]) } else { save(items) }
-        }
-        .onDeleteCommand { if !browser.selectedEntries.isEmpty { ui.confirmDelete = browser.selectedEntries } }
-    }
-
-    private var dropOverlay: some View {
-        RoundedRectangle(cornerRadius: 14)
-            .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 3, dash: [10, 6]))
-            .background(RoundedRectangle(cornerRadius: 14).fill(Color.accentColor.opacity(0.08)))
-            .overlay {
-                VStack(spacing: 8) {
-                    Image(systemName: "arrow.down.to.line.circle.fill").font(.system(size: 44))
-                    Text("Drop to send to \(phone.name)").font(.title3.weight(.semibold))
-                    Text(browser.crumbs.map(\.name).joined(separator: " › ")).font(.callout).foregroundStyle(.secondary)
-                }
-                .foregroundStyle(.tint)
-            }
-            .padding(12)
-            .allowsHitTesting(false)
+        PhoneTable(
+            entries: browser.entries,
+            selection: Bindable(browser).selection,
+            serial: phone.primary,
+            onOpen: { browser.open($0) },
+            onSave: { save($0) },
+            onSaveAs: { chooseAndSave($0) },
+            onDelete: { ui.confirmDelete = $0 },
+            onDropFiles: { urls, folder in send(urls, into: folder) }
+        )
     }
 
     @ToolbarContentBuilder
@@ -144,8 +99,8 @@ struct BrowserView: View {
 
     // MARK: actions
 
-    private func send(_ urls: [URL]) {
-        let dir = browser.path
+    private func send(_ urls: [URL], into folder: String? = nil) {
+        let dir = folder ?? browser.path
         center.upload(urls, to: phone, remoteDir: dir) { browser.refresh() }
     }
 
