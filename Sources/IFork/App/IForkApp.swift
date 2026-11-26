@@ -4,6 +4,8 @@ import SwiftUI
 struct IForkApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
+    init() { Bench.runIfRequested() }
+
     var body: some Scene {
         WindowGroup("iFork") {
             RootView()
