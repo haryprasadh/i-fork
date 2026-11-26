@@ -183,7 +183,7 @@ struct PhoneTable: NSViewRepresentable {
             let e = parent.entries[row]
             let type = e.isDirectory ? UTType.folder : (UTType(filenameExtension: (e.name as NSString).pathExtension) ?? .data)
             let p = NSFilePromiseProvider(fileType: type.identifier, delegate: self)
-            p.userInfo = ["path": e.path, "name": e.name, "dir": e.isDirectory, "serial": parent.serial]
+            p.userInfo = ["path": e.path, "name": e.name, "dir": e.isDirectory, "size": e.size, "serial": parent.serial]
             return p
         }
 
@@ -193,28 +193,19 @@ struct PhoneTable: NSViewRepresentable {
 
         func operationQueue(for filePromiseProvider: NSFilePromiseProvider) -> OperationQueue { promiseQueue }
 
-        /// Runs on promiseQueue (background). Pulls the file/folder straight to Finder's destination.
+        /// Runs on promiseQueue. Hands the item to TransferCenter (progress bar + both lanes); Finder waits for `completionHandler`.
         func filePromiseProvider(_ p: NSFilePromiseProvider, writePromiseTo url: URL, completionHandler: @escaping (Error?) -> Void) {
             guard let info = p.userInfo as? [String: Any], let path = info["path"] as? String,
-                  let serial = info["serial"] as? String else { completionHandler(nil); return }
-            let isDir = info["dir"] as? Bool ?? false
-            do {
-                let sync = try AdbSync(serial: serial)
-                defer { sync.quit() }
-                let files = isDir ? try PhoneFS.listRecursive(serial, path) : []
-                if isDir {
-                    try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-                    for f in files {
-                        let rel = String(f.path.dropFirst(path.count).drop(while: { $0 == "/" }))
-                        try sync.pull(f.path, to: url.appendingPathComponent(rel), progress: { _ in }, isCancelled: { false })
-                    }
-                } else {
-                    try sync.pull(path, to: url, progress: { _ in }, isCancelled: { false })
-                }
-                completionHandler(nil)
-            } catch {
-                completionHandler(error)
+                  let entry = parent.entries.first(where: { $0.path == path }) ?? Self.entry(from: info) else {
+                completionHandler(nil); return
             }
+            onMain { TransferCenter.shared.fulfillPromise(entry, to: url, completion: completionHandler) }
+        }
+
+        private static func entry(from info: [String: Any]) -> PhoneEntry? {
+            guard let path = info["path"] as? String, let name = info["name"] as? String else { return nil }
+            return PhoneEntry(path: path, name: name, isDirectory: info["dir"] as? Bool ?? false,
+                              size: info["size"] as? Int64 ?? 0, modified: Date())
         }
 
         // Drop in: files from Finder

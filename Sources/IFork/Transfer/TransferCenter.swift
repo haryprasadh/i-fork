@@ -96,18 +96,29 @@ private final class Scheduler: @unchecked Sendable {
     func download(_ entries: [PhoneEntry], from phone: Phone, to dir: URL) {
         guard !entries.isEmpty else { return }
         let title = entries.count == 1 ? entries[0].name : "\(entries.count) items"
-        let job = TransferJob(direction: .toMac, title: "\(title) → \(dir.lastPathComponent)")
-        job.revealURL = entries.count == 1 ? dir.appendingPathComponent(entries[0].name) : dir
+        download(entries.map { ($0, dir.appendingPathComponent($0.name)) }, from: phone,
+                 title: "\(title) → \(dir.lastPathComponent)",
+                 reveal: entries.count == 1 ? dir.appendingPathComponent(entries[0].name) : dir,
+                 onFinish: nil)
+    }
+
+    /// Core download: each phone entry (file or folder) goes to an exact local URL.
+    func download(_ targets: [(PhoneEntry, URL)], from phone: Phone, title: String, reveal: URL?,
+                  onFinish: (@MainActor (TransferJob) -> Void)?) {
+        guard !targets.isEmpty else { return }
+        let job = TransferJob(direction: .toMac, title: title)
+        job.revealURL = reveal
         let primary = phone.primary
-        start(job, phone: phone, onDone: nil) {
+        start(job, phone: phone, onDone: { onFinish?(job) }) {
             var items: [WorkItem] = []
             var skipped = 0
-            for e in entries {
-                let parent = (e.path as NSString).deletingLastPathComponent
+            for (e, dest) in targets {
                 let files = e.isDirectory ? try PhoneFS.listRecursive(primary, e.path) : [e]
+                if e.isDirectory { try FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true) }
                 for f in files {
-                    let rel = String(f.path.dropFirst(parent.count + 1))
-                    let local = dir.appendingPathComponent(rel)
+                    let local = e.isDirectory
+                        ? dest.appendingPathComponent(String(f.path.dropFirst(e.path.count).drop(while: { $0 == "/" })))
+                        : dest
                     // Resume-friendly: an identical-size file already there is skipped.
                     if let a = try? FileManager.default.attributesOfItem(atPath: local.path),
                        (a[.size] as? NSNumber)?.int64Value == f.size {
@@ -117,6 +128,31 @@ private final class Scheduler: @unchecked Sendable {
                 }
             }
             return (items, skipped)
+        }
+    }
+
+    // MARK: drag to Finder (file promises)
+
+    private struct Promise { let entry: PhoneEntry; let dest: URL; let done: (Error?) -> Void }
+    @ObservationIgnored private var pendingPromises: [Promise] = []
+
+    /// Finder asks for each dragged item separately; batch the ones from one drop into a single job.
+    func fulfillPromise(_ entry: PhoneEntry, to dest: URL, completion: @escaping (Error?) -> Void) {
+        guard let phone = DeviceMonitor.shared.phone else { completion(AdbError.fail("Phone disconnected")); return }
+        pendingPromises.append(Promise(entry: entry, dest: dest, done: completion))
+        guard pendingPromises.count == 1 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            MainActor.assumeIsolated {
+                let batch = self.pendingPromises
+                self.pendingPromises = []
+                let dir = batch[0].dest.deletingLastPathComponent()
+                let title = batch.count == 1 ? batch[0].entry.name : "\(batch.count) items"
+                self.download(batch.map { ($0.entry, $0.dest) }, from: phone, title: "\(title) → \(dir.lastPathComponent)",
+                              reveal: batch.count == 1 ? batch[0].dest : dir) { job in
+                    let err: Error? = job.state == .done ? nil : AdbError.fail(job.failures.first ?? "Transfer failed")
+                    batch.forEach { $0.done(err) }
+                }
+            }
         }
     }
 
@@ -216,7 +252,10 @@ private final class Scheduler: @unchecked Sendable {
                                 do {
                                     if sync == nil { sync = try AdbSync(serial: lane.serial) }
                                     if direction == .toMac {
-                                        try sync!.pull(it.remote, to: it.local, progress: progress, isCancelled: { job.cancelFlag.get() })
+                                        let finder = FinderProgress(file: it.local.appendingPathExtension("ifpart"), size: it.size)
+                                        defer { finder.finish() }
+                                        try sync!.pull(it.remote, to: it.local, progress: { n in progress(n); finder.add(n) },
+                                                       isCancelled: { job.cancelFlag.get() })
                                     } else {
                                         try sync!.push(it.local, to: it.remote, progress: progress, isCancelled: { job.cancelFlag.get() })
                                         pushed.update { $0.append(it.remote) }
@@ -285,4 +324,29 @@ private final class Scheduler: @unchecked Sendable {
         let el = max(now.timeIntervalSince(job.startedAt), 0.001)
         job.laneRates = lanes.mapValues { Double($0) / el }
     }
+}
+
+/// Publishes an NSProgress for a file so Finder draws a progress pie on it (like Safari downloads).
+private final class FinderProgress {
+    private let progress: Progress?
+    private var pending: Int64 = 0
+
+    init(file: URL, size: Int64) {
+        guard size > 8 << 20 else { progress = nil; return } // only worth it for bigger files
+        let p = Progress(totalUnitCount: size)
+        p.kind = .file
+        p.fileOperationKind = .downloading
+        p.fileURL = file
+        p.isCancellable = false
+        p.publish()
+        progress = p
+    }
+
+    func add(_ n: Int) {
+        guard let progress else { return }
+        pending += Int64(n)
+        if pending >= 1 << 20 { progress.completedUnitCount += pending; pending = 0 }
+    }
+
+    func finish() { progress?.unpublish() }
 }
