@@ -1,9 +1,14 @@
 import Foundation
 
 enum Fmt {
-    static func bytes(_ b: Int64) -> String {
-        ByteCountFormatter.string(fromByteCount: b, countStyle: .file)
-    }
+    private static let byteFmt: ByteCountFormatter = {
+        let f = ByteCountFormatter()
+        f.countStyle = .file
+        f.allowsNonnumericFormatting = false // "0 KB", not "Zero KB"
+        return f
+    }()
+
+    static func bytes(_ b: Int64) -> String { byteFmt.string(fromByteCount: b) }
 
     static func speed(_ bps: Double) -> String {
         bps >= 1e6 ? String(format: "%.1f MB/s", bps / 1e6) : String(format: "%.0f KB/s", bps / 1e3)

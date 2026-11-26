@@ -2,6 +2,15 @@ import Foundation
 import AppKit
 import Observation
 
+struct InFlight: Identifiable, Equatable {
+    let id: Int          // worker slot
+    let name: String
+    let size: Int64
+    var done: Int64
+    let lane: Lane.Kind
+    var fraction: Double { size > 0 ? min(1, Double(done) / Double(size)) : 0 }
+}
+
 @MainActor @Observable final class TransferJob: Identifiable {
     enum Direction { case toMac, toPhone }
     enum State: Equatable { case preparing, running, done, failed(String), cancelled }
@@ -27,6 +36,10 @@ import Observation
     @ObservationIgnored let laneBytes = Locked<[Lane.Kind: Int64]>([:])
     @ObservationIgnored let filesDone = Locked(0)
     @ObservationIgnored var lastSample: (t: Date, bytes: Int64)?
+    @ObservationIgnored let slots = Locked<[Int: InFlight]>([:]) // worker slot -> file it's copying
+
+    /// Files being copied right now (sampled from `slots`).
+    var inFlight: [InFlight] = []
 
     init(direction: Direction, title: String) {
         self.direction = direction
@@ -89,6 +102,7 @@ private final class Scheduler: @unchecked Sendable {
 
     private(set) var jobs: [TransferJob] = []
     var current: TransferJob? { jobs.first { $0.isActive } ?? jobs.first }
+    var active: [TransferJob] { jobs.filter { $0.isActive } }
 
     @ObservationIgnored private var ticker: Timer?
 
@@ -237,9 +251,10 @@ private final class Scheduler: @unchecked Sendable {
                 return dt > 2 && b > 0 ? Double(b) / dt : fallback
             }
 
-            for lane in lanes {
+            for (li, lane) in lanes.enumerated() {
                 let perLane = Int(ProcessInfo.processInfo.environment["IFORK_WORKERS"] ?? "") ?? 2
-                for _ in 0..<perLane {
+                for k in 0..<perLane {
+                    let slot = li * 10 + k
                     group.enter()
                     Thread.detachNewThread {
                         defer { group.leave() }
@@ -252,11 +267,15 @@ private final class Scheduler: @unchecked Sendable {
                                 continue
                             }
                             var attempt = 0
+                            job.slots.update { $0[slot] = InFlight(id: slot, name: (it.remote as NSString).lastPathComponent,
+                                                                   size: it.size, done: 0, lane: lane.kind) }
+                            defer { job.slots.update { _ = $0.removeValue(forKey: slot) } }
                             while true {
                                 var moved: Int64 = 0
                                 let progress: (Int) -> Void = { n in
                                     moved += Int64(n)
                                     job.laneBytes.update { $0[lane.kind, default: 0] += Int64(n) }
+                                    job.slots.update { $0[slot]?.done = moved }
                                 }
                                 do {
                                     if sync == nil { sync = try AdbSync(serial: lane.serial) }
@@ -340,6 +359,8 @@ private final class Scheduler: @unchecked Sendable {
         job.lastSample = (now, bytes)
         job.doneBytes = bytes
         job.doneFiles = job.filesDone.get()
+        let live = job.slots.get().values.sorted { $0.id < $1.id }
+        if live != job.inFlight { job.inFlight = live }
         let el = max(now.timeIntervalSince(job.startedAt), 0.001)
         job.laneRates = lanes.mapValues { Double($0) / el }
     }
