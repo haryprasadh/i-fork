@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import Observation
 
 @MainActor @Observable final class TransferJob: Identifiable {
@@ -139,6 +140,14 @@ private final class Scheduler: @unchecked Sendable {
     /// Finder asks for each dragged item separately; batch the ones from one drop into a single job.
     func fulfillPromise(_ entry: PhoneEntry, to dest: URL, completion: @escaping (Error?) -> Void) {
         guard let phone = DeviceMonitor.shared.phone else { completion(AdbError.fail("Phone disconnected")); return }
+        // Dropped on the Bin: don't copy anything; offer to delete it from the phone instead.
+        if dest.path.contains("/.Trash/") {
+            completion(CocoaError(.userCancelled))
+            let ui = UIState.shared
+            if !ui.confirmDelete.contains(entry) { ui.confirmDelete.append(entry) }
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
         pendingPromises.append(Promise(entry: entry, dest: dest, done: completion))
         guard pendingPromises.count == 1 else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
@@ -208,7 +217,7 @@ private final class Scheduler: @unchecked Sendable {
             let skipped: Int
             do { (items, skipped) = try plan() } catch {
                 let msg = error.localizedDescription
-                onMain { job.state = .failed(msg); job.finishedAt = Date() }
+                onMain { job.state = .failed(msg); job.finishedAt = Date(); job.failures = [msg]; onDone?() } // always report back
                 return
             }
             let total = items.reduce(0) { $0 + $1.size }
