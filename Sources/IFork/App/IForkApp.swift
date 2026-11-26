@@ -12,6 +12,18 @@ struct IForkApp: App {
                 .frame(minWidth: 860, minHeight: 540)
         }
         .windowStyle(.hiddenTitleBar)
+        .commands {
+            CommandMenu("Phone") {
+                Button("Eject") { if let p = DeviceMonitor.shared.phone { requestEject(p) } }
+                    .keyboardShortcut("e", modifiers: .command)
+                Button("Reconnect") { if let p = DeviceMonitor.shared.ejected.first { DeviceMonitor.shared.reconnect(p) } }
+                    .keyboardShortcut("k", modifiers: .command)
+                Divider()
+                Button("Connect Wi-Fi Lane") { DeviceMonitor.shared.retryWifi() }
+                Button("Connect over Wi-Fi (No Cable)…") { UIState.shared.showWirelessConnect = true }
+                Button("Wi-Fi Drop (QR)…") { UIState.shared.showWifiDrop = true }
+            }
+        }
     }
 }
 

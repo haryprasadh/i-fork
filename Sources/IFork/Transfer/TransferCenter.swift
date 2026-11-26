@@ -127,9 +127,10 @@ private final class Scheduler: @unchecked Sendable {
         start(job, phone: phone, onDone: { onFinish?(job) }) {
             var items: [WorkItem] = []
             var skipped = 0
+            var folders: [URL] = []
             for (e, dest) in targets {
                 let files = e.isDirectory ? try PhoneFS.listRecursive(primary, e.path) : [e]
-                if e.isDirectory { try FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true) }
+                if e.isDirectory { folders.append(dest) }
                 for f in files {
                     let local = e.isDirectory
                         ? dest.appendingPathComponent(String(f.path.dropFirst(e.path.count).drop(while: { $0 == "/" })))
@@ -142,8 +143,21 @@ private final class Scheduler: @unchecked Sendable {
                     items.append(WorkItem(remote: f.path, local: local, size: f.size))
                 }
             }
+            // Never fill the Mac's disk: keep a 2 GB reserve.
+            let need = items.reduce(0) { $0 + $1.size }
+            if let dest = targets.first?.1, let free = TransferCenter.macFreeSpace(at: dest), need > free - (2 << 30) {
+                throw AdbError.fail("Not enough space on your Mac: needs \(Fmt.short(need)), \(Fmt.short(max(0, free))) free. Empty the Bin or choose another folder.")
+            }
+            for f in folders { try FileManager.default.createDirectory(at: f, withIntermediateDirectories: true) }
             return (items, skipped)
         }
+    }
+
+    /// Finder-style available space on the volume holding `url` (includes purgeable space).
+    nonisolated static func macFreeSpace(at url: URL) -> Int64? {
+        var u = url
+        while !FileManager.default.fileExists(atPath: u.path) && u.path != "/" { u.deleteLastPathComponent() }
+        return (try? u.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]))?.volumeAvailableCapacityForImportantUsage
     }
 
     // MARK: drag to Finder (file promises)

@@ -13,6 +13,8 @@ struct RootView: View {
             VStack(spacing: 0) {
                 if let phone = devices.phone {
                     BrowserView(browser: browser, phone: phone)
+                } else if let gone = devices.ejected.first {
+                    EjectedView(phone: gone)
                 } else {
                     SetupView()
                 }
@@ -22,7 +24,21 @@ struct RootView: View {
         .onAppear { devices.start() }
         .onChange(of: devices.phone?.primary, initial: true) { _, serial in browser.attach(serial) }
         .sheet(isPresented: Bindable(ui).showWifiDrop) { WifiDropSheet() }
+        .sheet(isPresented: Bindable(ui).showWirelessConnect) { WirelessConnectSheet() }
+        .confirmationDialog("Transfers are still running", isPresented: Binding(
+            get: { ui.confirmEject != nil }, set: { if !$0 { ui.confirmEject = nil } })) {
+            Button("Stop transfers and eject", role: .destructive) {
+                if let p = ui.confirmEject { devices.eject(p) }
+                ui.confirmEject = nil
+            }
+        } message: { Text("Ejecting now cancels them. Files already copied are kept.") }
     }
+}
+
+/// Eject with a safety check: asks first if something is still copying.
+@MainActor func requestEject(_ phone: Phone) {
+    if TransferCenter.shared.active.isEmpty { DeviceMonitor.shared.eject(phone) }
+    else { UIState.shared.confirmEject = phone }
 }
 
 struct Sidebar: View {
@@ -79,10 +95,19 @@ struct DeviceCard: View {
     private let stats = Stats.shared
 
     var body: some View {
-        InfoCard(icon: "smartphone", title: phone.name, storage: stats.phoneStorage, memory: stats.phoneRAM) {
+        InfoCard(icon: "smartphone", title: phone.name, storage: stats.phoneStorage, memory: stats.phoneRAM,
+                 action: { requestEject(phone) }, actionIcon: "eject.fill", actionHelp: "Eject: stop and make it safe to unplug (⌘E)") {
             HStack(spacing: 6) {
                 LaneChip(label: "USB", on: phone.usb != nil)
                 LaneChip(label: "Wi-Fi", on: phone.wifi != nil && devices.useWifiLane)
+                if devices.useWifiLane && phone.wifi == nil && phone.usb != nil {
+                    if devices.connectingWifi {
+                        ProgressView().controlSize(.mini)
+                    } else {
+                        Button { devices.retryWifi() } label: { Image(systemName: "arrow.clockwise").font(.caption2.weight(.bold)) }
+                            .buttonStyle(.plain).foregroundStyle(.secondary).help("Connect the Wi-Fi lane now")
+                    }
+                }
                 Spacer()
                 Toggle("", isOn: Bindable(devices).useWifiLane).toggleStyle(.switch).controlSize(.mini)
                     .help("Use Wi-Fi alongside USB for extra speed")
@@ -109,13 +134,25 @@ struct InfoCard<Extra: View>: View {
     let storage: Usage?
     let memory: Usage?
     var storageLabel = "Storage"
+    var action: (() -> Void)? = nil
+    var actionIcon = ""
+    var actionHelp = ""
     @ViewBuilder var extra: () -> Extra
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Image(systemName: icon).font(.title3).foregroundStyle(.tint).frame(width: 22)
-                Text(title).font(.headline).lineLimit(1).truncationMode(.middle)
+                Text(title).font(.headline).lineLimit(1).minimumScaleFactor(0.75).truncationMode(.middle)
+                if let action {
+                    Spacer(minLength: 4)
+                    Button(action: action) {
+                        Image(systemName: actionIcon).font(.caption)
+                            .frame(width: 22, height: 20)
+                            .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+                    }
+                    .buttonStyle(.plain).foregroundStyle(.secondary).help(actionHelp)
+                }
             }
             UsageRow(label: storageLabel, usage: storage, text: storage.map { "\(Fmt.short($0.free)) free of \(Fmt.short($0.total))" },
                      warn: (storage?.fraction ?? 0) > 0.9)
@@ -186,10 +223,17 @@ struct SetupView: View {
                 Text(err).font(.caption).foregroundStyle(.red)
             }
             Divider().frame(width: 260)
-            Button { UIState.shared.showWifiDrop = true } label: {
-                Label("No cable? Use Wi-Fi Drop", systemImage: "qrcode")
+            HStack(spacing: 12) {
+                Button { UIState.shared.showWirelessConnect = true } label: {
+                    Label("Connect over Wi-Fi", systemImage: "wifi")
+                }
+                Button { UIState.shared.showWifiDrop = true } label: {
+                    Label("Wi-Fi Drop (QR)", systemImage: "qrcode")
+                }
             }
             .controlSize(.large)
+            Text("No cable? “Connect over Wi-Fi” gives full browsing; “Wi-Fi Drop” needs nothing on the phone.")
+                .font(.caption).foregroundStyle(.secondary)
         }
         .padding(40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -206,4 +250,86 @@ struct SetupView: View {
             }
         }
     }
+}
+
+/// Shown after Eject while the phone is still plugged in.
+struct EjectedView: View {
+    let phone: Phone
+    var body: some View {
+        VStack(spacing: 18) {
+            Image(systemName: "checkmark.circle.fill").font(.system(size: 54)).foregroundStyle(.green)
+            Text("Safe to unplug").font(.title2.weight(.semibold))
+            Text("\(phone.name) is disconnected from iFork. You can remove the cable.")
+                .foregroundStyle(.secondary)
+            Button { DeviceMonitor.shared.reconnect(phone) } label: {
+                Label("Reconnect", systemImage: "cable.connector")
+            }
+            .controlSize(.large).keyboardShortcut(.defaultAction)
+        }
+        .padding(40)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+/// Wi-Fi only connection (no cable) via Android's Wireless debugging pairing.
+struct WirelessConnectSheet: View {
+    private let devices = DeviceMonitor.shared
+    private let form = WirelessForm.shared
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Connect over Wi-Fi").font(.title2.weight(.semibold))
+            Text("Phone and Mac must be on the same Wi-Fi.").foregroundStyle(.secondary)
+
+            GroupBox {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("**1. First time only: pair.** On the phone open Developer options › Wireless debugging › **Pair device with pairing code**, then type what it shows:")
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack {
+                        TextField("IP address & port, e.g. 192.168.1.8:37123", text: Bindable(form).pairAddress)
+                        TextField("Wi-Fi pairing code", text: Bindable(form).code).frame(width: 150)
+                    }
+                    Text("Already paired before? Leave these empty.").font(.caption).foregroundStyle(.secondary)
+                }
+                .padding(6)
+            }
+            GroupBox {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("**2. Connect.** Type the **IP address & Port** shown at the top of the Wireless debugging screen:")
+                        .fixedSize(horizontal: false, vertical: true)
+                    TextField("e.g. 192.168.1.8:34425", text: Bindable(form).connectAddress)
+                }
+                .padding(6)
+            }
+            if let err = form.error { Text(err).font(.callout).foregroundStyle(.red) }
+            HStack {
+                Spacer()
+                Button("Cancel") { UIState.shared.showWirelessConnect = false }.keyboardShortcut(.cancelAction)
+                Button {
+                    form.error = nil
+                    devices.connectWireless(pairAddress: form.pairAddress.trimmingCharacters(in: .whitespaces),
+                                            code: form.code.trimmingCharacters(in: .whitespaces),
+                                            connectAddress: form.connectAddress.trimmingCharacters(in: .whitespaces)) { err in
+                        if let err { form.error = err } else { UIState.shared.showWirelessConnect = false }
+                    }
+                } label: {
+                    if devices.connectingWifi { ProgressView().controlSize(.small) } else { Text("Connect") }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(form.connectAddress.isEmpty || devices.connectingWifi)
+            }
+        }
+        .padding(24)
+        .frame(width: 520)
+    }
+}
+
+@MainActor @Observable final class WirelessForm {
+    static let shared = WirelessForm()
+    var pairAddress = ""
+    var code = ""
+    var connectAddress = UserDefaults.standard.string(forKey: "lastWirelessAddress") ?? "" {
+        didSet { UserDefaults.standard.set(connectAddress, forKey: "lastWirelessAddress") }
+    }
+    var error: String?
 }

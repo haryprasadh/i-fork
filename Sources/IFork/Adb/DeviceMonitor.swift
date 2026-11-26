@@ -36,6 +36,12 @@ struct Lane: Hashable {
 
     var phone: Phone? { phones.first }
 
+    /// Phones the user ejected: still plugged in, but iFork leaves them alone until Reconnect or replug.
+    private(set) var ejected: [Phone] = []
+    private(set) var connectingWifi = false
+    @ObservationIgnored private var ejectedIds = Set<String>()
+    @ObservationIgnored private var resolvedCache: [(AdbTransport, String, String)] = []
+
     @ObservationIgnored private var info: [String: (id: String, name: String)] = [:] // transport serial -> phone
     @ObservationIgnored private var probing = Set<String>()
     @ObservationIgnored private var lastTransports: [AdbTransport] = []
@@ -79,15 +85,66 @@ struct Lane: Hashable {
         let unauthorized = list.contains { $0.state == "unauthorized" }
         onMain {
             self.lastTransports = list
-            var byId: [String: Phone] = [:]
-            var order: [String] = []
-            for (t, id, name) in resolved {
-                if byId[id] == nil { byId[id] = Phone(id: id, name: name); order.append(id) }
-                if t.isWifi { byId[id]?.wifi = t.serial } else { byId[id]?.usb = t.serial }
-            }
-            self.phones = order.compactMap { byId[$0] }
-            self.needsAuthorization = unauthorized && self.phones.isEmpty
-            self.kickWifi()
+            self.resolvedCache = resolved
+            self.publish()
+            self.needsAuthorization = unauthorized && self.phones.isEmpty && self.ejected.isEmpty
+        }
+    }
+
+    private func publish() {
+        var byId: [String: Phone] = [:]
+        var order: [String] = []
+        for (t, id, name) in resolvedCache {
+            if byId[id] == nil { byId[id] = Phone(id: id, name: name); order.append(id) }
+            if t.isWifi { byId[id]?.wifi = t.serial } else { byId[id]?.usb = t.serial }
+        }
+        let all = order.compactMap { byId[$0] }
+        ejectedIds = ejectedIds.intersection(all.map(\.id)) // unplugged = forget the eject
+        phones = all.filter { !ejectedIds.contains($0.id) }
+        ejected = all.filter { ejectedIds.contains($0.id) }
+        kickWifi()
+    }
+
+    // MARK: user actions
+
+    /// Stops transfers, drops the Wi-Fi lane and hides the phone so it's safe to unplug.
+    func eject(_ phone: Phone) {
+        TransferCenter.shared.active.forEach { TransferCenter.shared.cancel($0) }
+        ejectedIds.insert(phone.id)
+        if let wifi = phone.wifi { DispatchQueue.global().async { AdbClient.disconnect(wifi) } }
+        wifiHint = nil
+        publish()
+    }
+
+    func reconnect(_ phone: Phone) {
+        ejectedIds.remove(phone.id)
+        probing.remove(phone.id)
+        publish()
+    }
+
+    /// Try the Wi-Fi lane again right now (e.g. after turning on Wireless debugging).
+    func retryWifi() {
+        probing.removeAll()
+        wifiHint = nil
+        if !useWifiLane { useWifiLane = true } else { kickWifi() }
+    }
+
+    /// Wi-Fi only, no cable: pair with the code from "Pair device with pairing code", then connect.
+    func connectWireless(pairAddress: String, code: String, connectAddress: String, done: @escaping @MainActor (String?) -> Void) {
+        connectingWifi = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            var failure: String?
+            do {
+                if !code.isEmpty && !pairAddress.isEmpty {
+                    let s = try AdbSocket()
+                    try s.request("host:pair:\(code):\(pairAddress)")
+                    let msg = (try? s.readHexString()) ?? ""
+                    if msg.lowercased().contains("fail") || msg.lowercased().contains("error") { throw AdbError.fail(msg) }
+                }
+                let msg = try AdbClient.connect(connectAddress)
+                if !msg.contains("connected") { throw AdbError.fail(msg) }
+            } catch { failure = error.localizedDescription }
+            onMain { self.connectingWifi = false; done(failure) }
         }
     }
 
@@ -95,10 +152,12 @@ struct Lane: Hashable {
         guard useWifiLane else { return }
         for p in phones where p.usb != nil && p.wifi == nil && !probing.contains(p.id) {
             probing.insert(p.id)
+            connectingWifi = true
             let usb = p.usb!, id = p.id
             DispatchQueue.global(qos: .utility).async {
                 let hint = DeviceMonitor.connectWifiLane(usb: usb, phoneId: id)
                 onMain {
+                    self.connectingWifi = false
                     self.wifiHint = hint
                     // Retry later if it failed (e.g. Wi-Fi toggled on afterwards).
                     DispatchQueue.main.asyncAfter(deadline: .now() + (hint == nil ? 2 : 20)) { MainActor.assumeIsolated { _ = self.probing.remove(id) } }

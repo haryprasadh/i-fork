@@ -13,6 +13,8 @@ import Observation
     var newFolderName = ""
     var dismissedJob: UUID?
     var expandedJobs = Set<UUID>()
+    var confirmEject: Phone?
+    var showWirelessConnect = false
     var saveDirPath: String = UserDefaults.standard.string(forKey: "saveDir")
         ?? FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask)[0].path {
         didSet { UserDefaults.standard.set(saveDirPath, forKey: "saveDir") }
