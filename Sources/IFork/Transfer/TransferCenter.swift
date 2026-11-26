@@ -328,6 +328,7 @@ private final class Scheduler: @unchecked Sendable {
                 if job.cancelFlag.get() { job.state = .cancelled }
                 else if !fails.isEmpty { job.state = .failed("\(fails.count) file(s) failed") }
                 else { job.state = .done }
+                Stats.shared.refresh()
                 onDone?()
             }
         }

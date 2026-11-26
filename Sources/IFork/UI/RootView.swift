@@ -61,8 +61,14 @@ struct Sidebar: View {
             }
             .listStyle(.sidebar)
 
-            if let phone = devices.phone { DeviceCard(phone: phone, browser: browser) }
+            VStack(spacing: 8) {
+                if let phone = devices.phone { DeviceCard(phone: phone, browser: browser) }
+                MacCard()
+            }
+            .padding(10)
         }
+        .onAppear { Stats.shared.start() }
+        .onChange(of: devices.phone?.primary) { _, _ in Stats.shared.refresh() }
     }
 }
 
@@ -70,22 +76,10 @@ struct DeviceCard: View {
     let phone: Phone
     let browser: BrowserModel
     private let devices = DeviceMonitor.shared
+    private let stats = Stats.shared
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Image(systemName: "smartphone").font(.title2).foregroundStyle(.tint)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(phone.name).font(.headline).lineLimit(1)
-                    if let s = browser.freeSpace {
-                        Text("\(Fmt.bytes(s.free)) free of \(Fmt.bytes(s.total))").font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-            }
-            if let s = browser.freeSpace, s.total > 0 {
-                ProgressView(value: Double(s.total - s.free), total: Double(s.total))
-                    .tint(Double(s.free) / Double(s.total) < 0.1 ? .orange : .accentColor)
-            }
+        InfoCard(icon: "smartphone", title: phone.name, storage: stats.phoneStorage, memory: stats.phoneRAM) {
             HStack(spacing: 6) {
                 LaneChip(label: "USB", on: phone.usb != nil)
                 LaneChip(label: "Wi-Fi", on: phone.wifi != nil && devices.useWifiLane)
@@ -97,9 +91,58 @@ struct DeviceCard: View {
                 Text(hint).font(.caption2).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
         }
+    }
+}
+
+struct MacCard: View {
+    private let stats = Stats.shared
+    var body: some View {
+        InfoCard(icon: "laptopcomputer", title: "This Mac", storage: stats.macStorage, memory: stats.macRAM) { EmptyView() }
+            .help(stats.macVolume.isEmpty ? "" : "Storage of \(stats.macVolume), where iFork saves files")
+    }
+}
+
+/// Shared card: name, storage bar, memory bar, optional extra content.
+struct InfoCard<Extra: View>: View {
+    let icon: String
+    let title: String
+    let storage: Usage?
+    let memory: Usage?
+    var storageLabel = "Storage"
+    @ViewBuilder var extra: () -> Extra
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: icon).font(.title3).foregroundStyle(.tint).frame(width: 22)
+                Text(title).font(.headline).lineLimit(1).truncationMode(.middle)
+            }
+            UsageRow(label: storageLabel, usage: storage, text: storage.map { "\(Fmt.short($0.free)) free of \(Fmt.short($0.total))" },
+                     warn: (storage?.fraction ?? 0) > 0.9)
+            UsageRow(label: "Memory", usage: memory, text: memory.map { "\(Fmt.gb($0.used)) of \(Fmt.gb($0.total)) used" },
+                     warn: (memory?.fraction ?? 0) > 0.85)
+            extra()
+        }
         .padding(12)
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
-        .padding(10)
+    }
+}
+
+struct UsageRow: View {
+    let label: String
+    let usage: Usage?
+    let text: String?
+    let warn: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack {
+                Text(label).font(.caption.weight(.medium)).lineLimit(1)
+                Spacer(minLength: 4)
+                Text(text ?? "…").font(.caption2).foregroundStyle(.secondary).monospacedDigit().lineLimit(1)
+            }
+            ThinBar(fraction: usage?.fraction ?? 0, color: warn ? .orange : .accentColor)
+        }
     }
 }
 
