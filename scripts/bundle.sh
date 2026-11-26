@@ -2,10 +2,12 @@
 # Build release binary and wrap it in a minimal signed .app bundle.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-swift build -c release
+# Universal binary: Apple silicon + Intel
+swift build -c release --arch arm64 --arch x86_64
+BIN=$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)/IFork
 APP=build/iFork.app
 rm -rf "$APP"; mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp .build/release/IFork "$APP/Contents/MacOS/iFork"
+cp "$BIN" "$APP/Contents/MacOS/iFork"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -26,5 +28,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </dict></plist>
 PLIST
 codesign --force --sign - "$APP" >/dev/null
-mkdir -p ~/Applications && rm -rf ~/Applications/iFork.app && cp -R "$APP" ~/Applications/
-echo "Built $APP and installed to ~/Applications/iFork.app"
+if [[ "${1:-}" == "--install" ]]; then
+  mkdir -p ~/Applications && rm -rf ~/Applications/iFork.app && cp -R "$APP" ~/Applications/
+  echo "Installed to ~/Applications/iFork.app"
+fi
+# Zip for GitHub Releases
+(cd build && rm -f iFork.zip && ditto -c -k --keepParent iFork.app iFork.zip)
+echo "Built $APP and build/iFork.zip"

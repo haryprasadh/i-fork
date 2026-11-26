@@ -15,7 +15,6 @@ enum AdbClient {
             "/opt/homebrew/bin/adb",
             "/usr/local/bin/adb",
             NSHomeDirectory() + "/Library/Android/sdk/platform-tools/adb",
-            "/Applications/MacDroid.app/Contents/Resources/adb",
         ]
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }()
