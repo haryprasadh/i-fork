@@ -263,8 +263,18 @@ private final class Scheduler: @unchecked Sendable {
                                     if direction == .toMac {
                                         let finder = FinderProgress(file: it.local.appendingPathExtension("ifpart"), size: it.size)
                                         defer { finder.finish() }
+                                        let part = it.local.appendingPathExtension("ifpart")
+                                        var lastCheck = Date()
                                         try sync!.pull(it.remote, to: it.local, progress: { n in progress(n); finder.add(n) },
-                                                       isCancelled: { job.cancelFlag.get() })
+                                                       isCancelled: {
+                                            if job.cancelFlag.get() { return true }
+                                            // Destination moved or trashed mid-copy (e.g. folder dragged to the Bin): stop the job.
+                                            if Date().timeIntervalSince(lastCheck) > 1 {
+                                                lastCheck = Date()
+                                                if !FileManager.default.fileExists(atPath: part.path) { job.cancelFlag.set(true); return true }
+                                            }
+                                            return false
+                                        })
                                     } else {
                                         try sync!.push(it.local, to: it.remote, progress: progress, isCancelled: { job.cancelFlag.get() })
                                         pushed.update { $0.append(it.remote) }
